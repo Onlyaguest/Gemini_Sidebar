@@ -13,10 +13,10 @@
   position: fixed;
   right: 14px;
   top: 72px;
-  height: calc(100vh - 120px);
-  width: 340px;
+  width: 300px;
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: flex-end;
   gap: 10px;
   z-index: 2147483646;
   pointer-events: none;
@@ -77,8 +77,10 @@
 
 #gps-root .gps-panel {
   pointer-events: auto;
-  flex: 1;
-  height: 100%;
+  flex: 0 1 auto;
+  width: 100%;
+  height: auto;
+  max-height: calc(100vh - 160px);
   background: var(--gps-bg);
   border-radius: 18px;
   border: 1px solid var(--gps-border);
@@ -90,7 +92,7 @@
   overflow: hidden;
   backdrop-filter: blur(18px) saturate(180%);
   position: relative;
-  animation: gps-slide-in 420ms ease;
+  animation: gps-slide-in 320ms ease;
 }
 
 #gps-root .gps-panel::before {
@@ -118,9 +120,7 @@
 }
 
 #gps-root.gps-collapsed .gps-panel {
-  transform: translateX(120%);
-  opacity: 0;
-  pointer-events: none;
+  display: none;
 }
 
 #gps-root .gps-header {
@@ -505,11 +505,11 @@
 @keyframes gps-slide-in {
   from {
     opacity: 0;
-    transform: translateX(16px);
+    transform: translateY(-8px);
   }
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: translateY(0);
   }
 }
 
@@ -526,16 +526,15 @@
 
 @media (max-width: 960px) {
   #gps-root {
-    width: 280px;
+    width: 260px;
     right: 8px;
     top: 64px;
-    height: calc(100vh - 110px);
   }
 }
 
 @media (max-width: 720px) {
   #gps-root {
-    width: 240px;
+    width: 220px;
     top: 54px;
   }
 
