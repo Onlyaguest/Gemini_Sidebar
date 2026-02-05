@@ -17,7 +17,9 @@
 
 1. 打开 Chrome 扩展管理页：`chrome://extensions/`
 2. 开启「开发者模式」
-3. 点击「加载已解压的扩展程序」并选择本目录：`tasks/gemini-prompt-sidebar`
+3. 点击「加载已解压的扩展程序」并选择扩展目录（包含 `manifest.json` 的目录）
+   - 独立项目：选择本仓库根目录
+   - 在大项目中：选择 `tasks/gemini-prompt-sidebar`
 4. 打开 Gemini 网页版：`https://gemini.google.com/`
 5. 点击浏览器工具栏的扩展图标，侧边栏会出现
 6. 在右侧侧边栏点击预设即可插入到输入框

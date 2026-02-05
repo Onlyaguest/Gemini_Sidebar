@@ -1135,14 +1135,22 @@
     toggle.innerHTML = "<span class=\"gps-toggle-label\">Prompts</span><span class=\"gps-toggle-close\" aria-hidden=\"true\">×</span>";
     toggle.title = "Toggle prompt sidebar";
     let suppressToggleClick = false;
+    let pointerToggleHandled = false;
+    const toggleRoot = () => {
+      root.classList.toggle("gps-collapsed");
+      localStorage.setItem(COLLAPSED_KEY, root.classList.contains("gps-collapsed") ? "1" : "0");
+      updateToggleState();
+    };
     toggle.addEventListener("click", () => {
+      if (pointerToggleHandled) {
+        pointerToggleHandled = false;
+        return;
+      }
       if (suppressToggleClick) {
         suppressToggleClick = false;
         return;
       }
-      root.classList.toggle("gps-collapsed");
-      localStorage.setItem(COLLAPSED_KEY, root.classList.contains("gps-collapsed") ? "1" : "0");
-      updateToggleState();
+      toggleRoot();
     });
     const closeBadge = toggle.querySelector(".gps-toggle-close");
     if (closeBadge) {
@@ -1226,6 +1234,9 @@
           }
           const rect = root.getBoundingClientRect();
           savePosition(rect.left, rect.top);
+        } else if (handle === toggle) {
+          pointerToggleHandled = true;
+          toggleRoot();
         }
         dragState = null;
       });
