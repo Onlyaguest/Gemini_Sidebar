@@ -10,6 +10,7 @@
   const SCRATCH_PERSIST_KEY = "gps-scratch-persist";
   const SCRATCH_COLLAPSED_KEY = "gps-scratch-collapsed";
   const EXPORT_COLLAPSED_KEY = "gps-export-collapsed";
+  const IMAGE_COLLAPSED_KEY = "gps-image-collapsed";
   const POSITION_KEY = "gps-position";
   const HIDDEN_KEY = "gps-hidden";
   const REFERENCE_COLLAPSED_KEY = "gps-reference-collapsed";
@@ -40,6 +41,12 @@
   const OBSIDIAN_VAULT = "ViviNotes";
   const OBSIDIAN_FOLDER = "Draft";
   const OBSIDIAN_PREFIX = "Gemini-";
+  const IMAGE_CONFIG = {
+    minDelay: 1800,
+    maxDelay: 3200,
+    maxConcurrent: 3,
+    prefix: "gemini-img"
+  };
 
   const ready = (fn) => {
     if (document.readyState === "loading") {
@@ -50,6 +57,7 @@
   };
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const loadPosition = () => {
     try {
@@ -665,6 +673,339 @@
     showToast("已下载 Markdown");
   };
 
+  const getFallbackImageUrl = (src) => {
+    if (!src) return src;
+    try {
+      if (src.includes("googleusercontent.com") && !src.includes("/rd-gg/")) {
+        const baseUrl = src.split("=")[0];
+        return `${baseUrl}=s0`;
+      }
+    } catch (error) {
+      return src;
+    }
+    return src;
+  };
+
+  const scanDownloadableImages = () => {
+    const resultList = [];
+    const downloadButtons = queryAllDeep(
+      "button[data-test-id='download-generated-image-button'], button[aria-label*='Download image']"
+    );
+    downloadButtons.forEach((btn, index) => {
+      let container = btn.parentElement;
+      let previewSrc = null;
+      for (let i = 0; i < 6; i += 1) {
+        if (!container) break;
+        const imgs = container.querySelectorAll("img");
+        for (const img of imgs) {
+          if (img.naturalWidth > 150 && img.naturalHeight > 150) {
+            previewSrc = img.currentSrc || img.src;
+            break;
+          }
+        }
+        if (previewSrc) break;
+        container = container.parentElement;
+      }
+      const finalPreviewSrc =
+        previewSrc ||
+        "https://www.gstatic.com/images/branding/product/2x/gemini_gradient_icon_48dp.png";
+      resultList.push({
+        id: index,
+        button: btn,
+        previewUrl: finalPreviewSrc,
+        fallbackUrl: getFallbackImageUrl(finalPreviewSrc)
+      });
+    });
+    return resultList;
+  };
+
+  const downloadViaAnchor = (url, filename) => {
+    return new Promise((resolve) => {
+      if (!url) {
+        resolve({ ok: false, error: "missing url" });
+        return;
+      }
+      const link = document.createElement("a");
+      link.href = url;
+      if (filename) link.download = filename;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      resolve({ ok: true });
+    });
+  };
+
+  const downloadImageViaBackground = (url, filename) => {
+    return new Promise((resolve) => {
+      if (!chrome?.runtime?.sendMessage) {
+        downloadViaAnchor(url, filename).then(resolve);
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "gps-download-image", url, filename }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        if (!response || response.ok !== true) {
+          resolve({ ok: false, error: response?.error || "download failed" });
+          return;
+        }
+        resolve({ ok: true });
+      });
+    });
+  };
+
+  const getImageExtension = (url) => {
+    if (!url) return "jpg";
+    if (url.includes("image/png") || url.includes("fmt=png")) return "png";
+    if (url.includes("image/jpeg") || url.includes("fmt=jpg")) return "jpg";
+    if (url.includes("image/webp") || url.includes("fmt=webp")) return "webp";
+    return "jpg";
+  };
+
+  const processImageQueueSerial = async (items, onProgress) => {
+    let successCount = 0;
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      if (onProgress) {
+        onProgress({
+          completed: i,
+          total: items.length,
+          mode: "serial"
+        });
+      }
+      try {
+        if (!item.button || !item.button.isConnected) {
+          throw new Error("download button not available");
+        }
+        item.button.scrollIntoView({ behavior: "smooth", block: "center" });
+        await sleep(600);
+        if (!item.button.disabled) {
+          item.button.click();
+          successCount += 1;
+        }
+      } catch (error) {
+        console.warn(`[Gemini Sidebar] 下载点击失败: ${error.message}`);
+      }
+      const randomDelay =
+        Math.floor(Math.random() * (IMAGE_CONFIG.maxDelay - IMAGE_CONFIG.minDelay + 1)) +
+        IMAGE_CONFIG.minDelay;
+      await sleep(randomDelay);
+    }
+    if (onProgress) {
+      onProgress({
+        completed: items.length,
+        total: items.length,
+        mode: "serial",
+        done: true,
+        success: successCount
+      });
+    }
+    return { success: successCount, total: items.length };
+  };
+
+  const processImageQueueParallel = async (items, onProgress) => {
+    const total = items.length;
+    if (total === 0) return { success: 0, total: 0 };
+    let completed = 0;
+    let active = 0;
+    let success = 0;
+    let cursor = 0;
+    const batchStamp = formatTimestamp();
+    const workerCount = Math.min(IMAGE_CONFIG.maxConcurrent, total);
+
+    const worker = async () => {
+      while (cursor < total) {
+        const currentIndex = cursor;
+        cursor += 1;
+        const item = items[currentIndex];
+        active += 1;
+        if (onProgress) {
+          onProgress({
+            completed,
+            total,
+            active,
+            mode: "parallel"
+          });
+        }
+        const ext = getImageExtension(item.fallbackUrl);
+        const filename = `${IMAGE_CONFIG.prefix}-${batchStamp}-${String(currentIndex + 1).padStart(2, "0")}.${ext}`;
+        const result = await downloadImageViaBackground(item.fallbackUrl, filename);
+        if (result.ok) success += 1;
+        active -= 1;
+        completed += 1;
+        if (onProgress) {
+          onProgress({
+            completed,
+            total,
+            active,
+            mode: "parallel"
+          });
+        }
+        await sleep(60);
+      }
+    };
+
+    const workers = Array.from({ length: workerCount }, () => worker());
+    await Promise.all(workers);
+    if (onProgress) {
+      onProgress({
+        completed: total,
+        total,
+        active: 0,
+        mode: "parallel",
+        done: true,
+        success
+      });
+    }
+    return { success, total };
+  };
+
+  const createImageSelectionModal = (items) => {
+    const existing = document.querySelector(".gps-image-modal");
+    if (existing) existing.remove();
+
+    const modal = document.createElement("div");
+    modal.className = "gps-image-modal";
+
+    const panel = document.createElement("div");
+    panel.className = "gps-image-panel";
+
+    const header = document.createElement("div");
+    header.className = "gps-image-header";
+
+    const titleRow = document.createElement("div");
+    titleRow.className = "gps-image-title-row";
+
+    const title = document.createElement("div");
+    title.className = "gps-image-title";
+    title.textContent = `确认下载 (${items.length} 张)`;
+
+    const status = document.createElement("div");
+    status.className = "gps-image-status";
+    status.textContent = `已选 ${items.length}/${items.length}`;
+
+    titleRow.appendChild(title);
+    titleRow.appendChild(status);
+
+    const optionRow = document.createElement("label");
+    optionRow.className = "gps-image-option";
+
+    const optionInput = document.createElement("input");
+    optionInput.type = "checkbox";
+    optionInput.checked = false;
+
+    const optionText = document.createElement("span");
+    optionText.textContent = "极速模式（并行）";
+
+    const optionHint = document.createElement("div");
+    optionHint.className = "gps-image-option-hint";
+    optionHint.textContent = "极速模式会用直链下载，文件名与官方可能不同。";
+
+    optionRow.appendChild(optionInput);
+    optionRow.appendChild(optionText);
+
+    header.appendChild(titleRow);
+    header.appendChild(optionRow);
+    header.appendChild(optionHint);
+
+    const content = document.createElement("div");
+    content.className = "gps-image-content";
+
+    const selections = [];
+
+    const updateSelectionStatus = () => {
+      const count = selections.filter((entry) => entry.wrapper.classList.contains("gps-image-selected")).length;
+      status.textContent = `已选 ${count}/${items.length}`;
+    };
+
+    items.forEach((item) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "gps-image-item gps-image-selected";
+
+      const img = document.createElement("img");
+      img.src = item.previewUrl;
+      img.alt = "Gemini Image";
+
+      const checkMark = document.createElement("div");
+      checkMark.className = "gps-image-check";
+      checkMark.textContent = "✓";
+
+      wrapper.addEventListener("click", () => {
+        wrapper.classList.toggle("gps-image-selected");
+        updateSelectionStatus();
+      });
+
+      wrapper.appendChild(img);
+      wrapper.appendChild(checkMark);
+      content.appendChild(wrapper);
+      selections.push({ wrapper, item });
+    });
+
+    const footer = document.createElement("div");
+    footer.className = "gps-image-footer";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "gps-image-btn-secondary";
+    cancelButton.textContent = "取消";
+    cancelButton.addEventListener("click", () => modal.remove());
+
+    const confirmButton = document.createElement("button");
+    confirmButton.type = "button";
+    confirmButton.className = "gps-image-btn-primary";
+    confirmButton.textContent = "开始下载";
+
+    const setWorking = (working) => {
+      confirmButton.disabled = working;
+      cancelButton.disabled = working;
+      modal.classList.toggle("gps-image-working", working);
+    };
+
+    confirmButton.addEventListener("click", async () => {
+      const selectedItems = selections
+        .filter((entry) => entry.wrapper.classList.contains("gps-image-selected"))
+        .map((entry) => entry.item);
+      if (selectedItems.length === 0) {
+        showToast("请至少选择一张图片");
+        return;
+      }
+      const useParallel = optionInput.checked;
+      setWorking(true);
+      const updateProgress = (progress) => {
+        if (progress.done) {
+          status.textContent = `完成 ${progress.success || 0}/${progress.total || 0}`;
+          return;
+        }
+        if (progress.mode === "parallel") {
+          status.textContent = `下载中 ${progress.completed + 1}/${progress.total} · 进行中 ${progress.active}`;
+        } else {
+          status.textContent = `下载中 ${progress.completed + 1}/${progress.total}`;
+        }
+      };
+      try {
+        const result = useParallel
+          ? await processImageQueueParallel(selectedItems, updateProgress)
+          : await processImageQueueSerial(selectedItems, updateProgress);
+        showToast(`下载完成 (${result.success}/${result.total})`);
+      } finally {
+        modal.remove();
+      }
+    });
+
+    footer.appendChild(cancelButton);
+    footer.appendChild(confirmButton);
+    panel.appendChild(header);
+    panel.appendChild(content);
+    panel.appendChild(footer);
+    modal.appendChild(panel);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) modal.remove();
+    });
+    document.body.appendChild(modal);
+  };
+
   const createGroup = (group, options = {}) => {
     const groupEl = document.createElement("div");
     groupEl.className = "gps-group";
@@ -844,6 +1185,7 @@
   };
 
   const loadExportState = () => localStorage.getItem(EXPORT_COLLAPSED_KEY) !== "0";
+  const loadImageState = () => localStorage.getItem(IMAGE_COLLAPSED_KEY) !== "0";
 
   const loadReferenceState = () => localStorage.getItem(REFERENCE_COLLAPSED_KEY) !== "0";
 
@@ -1081,6 +1423,76 @@
     return wrap;
   };
 
+  const createImagePanel = () => {
+    let collapsed = loadImageState();
+    const wrap = document.createElement("div");
+    wrap.className = "gps-image";
+
+    const top = document.createElement("div");
+    top.className = "gps-image-top gps-section-header";
+    top.setAttribute("role", "button");
+    top.tabIndex = 0;
+
+    const title = document.createElement("div");
+    title.className = "gps-image-title";
+    title.textContent = "批量图片";
+
+    const caret = document.createElement("span");
+    caret.className = "gps-section-caret";
+    caret.textContent = "▾";
+
+    const hint = document.createElement("div");
+    hint.className = "gps-image-hint";
+    hint.textContent = "先滚动页面，确保图片已加载";
+
+    const actions = document.createElement("div");
+    actions.className = "gps-image-actions";
+
+    const scanButton = document.createElement("button");
+    scanButton.type = "button";
+    scanButton.className = "gps-image-action";
+    scanButton.textContent = "扫描并选择下载";
+    scanButton.addEventListener("click", () => {
+      const items = scanDownloadableImages();
+      if (!items.length) {
+        showToast("未找到可下载图片，请继续滚动页面");
+        return;
+      }
+      createImageSelectionModal(items);
+    });
+
+    const updateCollapseUI = () => {
+      top.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      wrap.classList.toggle("gps-image-collapsed", collapsed);
+      localStorage.setItem(IMAGE_COLLAPSED_KEY, collapsed ? "1" : "0");
+    };
+
+    const toggleCollapse = () => {
+      collapsed = !collapsed;
+      updateCollapseUI();
+    };
+
+    top.addEventListener("click", (event) => {
+      if (event.target && event.target.closest("button")) return;
+      toggleCollapse();
+    });
+
+    top.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleCollapse();
+    });
+
+    actions.appendChild(scanButton);
+    top.appendChild(title);
+    top.appendChild(caret);
+    wrap.appendChild(top);
+    wrap.appendChild(hint);
+    wrap.appendChild(actions);
+    updateCollapseUI();
+    return wrap;
+  };
+
   const createUtilityGroup = () => {
     const groupEl = document.createElement("div");
     groupEl.className = "gps-group gps-utility-group";
@@ -1098,6 +1510,7 @@
     items.className = "gps-items gps-utility-items";
     items.appendChild(createReferencePanel());
     items.appendChild(createExportPanel());
+    items.appendChild(createImagePanel());
     items.appendChild(createScratchPad());
 
     groupEl.appendChild(header);

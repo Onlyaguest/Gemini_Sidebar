@@ -55,3 +55,28 @@ chrome.action.onClicked.addListener((tab) => {
     injectAndOpen();
   });
 });
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== "gps-download-image") return;
+  const url = typeof message.url === "string" ? message.url : "";
+  const filename = typeof message.filename === "string" ? message.filename : "";
+  if (!url) {
+    sendResponse({ ok: false, error: "missing url" });
+    return true;
+  }
+  chrome.downloads.download(
+    { url, filename: filename || undefined, saveAs: false },
+    (downloadId) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      if (!downloadId) {
+        sendResponse({ ok: false, error: "download failed" });
+        return;
+      }
+      sendResponse({ ok: true, downloadId });
+    }
+  );
+  return true;
+});
